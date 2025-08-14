@@ -618,57 +618,234 @@ func getClubInfo(w http.ResponseWriter, r *http.Request) {
 		Category:       category,
 		Competitions:   competitions,
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(clubInfo)
 }
 
 func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/club/{type}/{id}", getClubInfo).Methods("GET")
-	r.HandleFunc("/club/{type}/{id}/table", getClubTables).Methods("GET")
-	r.HandleFunc("/club/search", getClubSearch).Methods("GET")
-	r.HandleFunc("/club/{id:[0-9a-fA-F-]+}", func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		http.Redirect(w, r, "/club/football/"+vars["id"], http.StatusMovedPermanently)
-	}).Methods("GET")
-	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","message":"FACR Scraper API is running"}`))
-	})
-	port := ":8080"
-	fmt.Printf("Server running on http://localhost%s\n", port)
-	log.Fatal(http.ListenAndServe(port, r))
+    r := mux.NewRouter()
+    r.HandleFunc("/club/{type}/{id}", getClubInfo).Methods("GET")
+    r.HandleFunc("/club/{type}/{id}/table", getClubTables).Methods("GET")
+    r.HandleFunc("/club/search", getClubSearch).Methods("GET")
+    r.HandleFunc("/club/{id:[0-9a-fA-F-]+}", func(w http.ResponseWriter, r *http.Request) {
+        vars := mux.Vars(r)
+        http.Redirect(w, r, "/club/football/"+vars["id"], http.StatusMovedPermanently)
+    }).Methods("GET")
+    r.HandleFunc("/", docsHandler)
+    port := ":8080"
+    fmt.Printf("Server running on http://localhost%s\n", port)
+    log.Fatal(http.ListenAndServe(port, r))
 }
 
-// containsFold returns true if substr is within s, case-insensitive.
+// docsHandler serves a simple HTML API documentation at the root endpoint.
+func docsHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    io.WriteString(w, `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FACR Scraper API Docs</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 24px; line-height: 1.5; }
+    header { margin-bottom: 24px; }
+    code, pre { background: rgba(127,127,127,.15); padding: .2em .4em; border-radius: 4px; }
+    pre { padding: 12px; overflow: auto; }
+    .ep { margin: 18px 0; padding: 16px; border-left: 4px solid #4f46e5; background: rgba(79,70,229,.08); border-radius: 6px; }
+    h1 { margin: 0 0 8px; font-size: 1.6rem; }
+    h2 { margin: 22px 0 8px; font-size: 1.2rem; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ul { padding-left: 18px; }
+    footer { margin-top: 28px; font-size: .9rem; opacity: .8; }
+  </style>
+  <link rel="icon" href="data:," />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <meta name="robots" content="noindex" />
+  <script>
+    function ex(id, url) { const el = document.getElementById(id); el.textContent = window.location.origin + url; el.href = url; }
+    window.addEventListener('DOMContentLoaded', ()=>{
+      ex('ex-search', '/club/search?q=Sparta');
+      ex('ex-info', '/club/football/00000000-0000-0000-0000-000000000000');
+      ex('ex-table', '/club/football/00000000-0000-0000-0000-000000000000/table');
+    });
+  </script>
+</head>
+<body>
+  <header>
+    <h1>FACR Scraper API</h1>
+    <p>Status: <code>ok</code> — server is running.</p>
+  </header>
+
+  <section class="ep">
+    <h2>Search Clubs</h2>
+    <p><strong>GET</strong> <code>/club/search?q=QUERY</code></p>
+    <p>Find clubs on fotbal.cz. Supports football and futsal clubs.</p>
+    <p>Example: <a id="ex-search" href="/club/search?q=Sparta">/club/search?q=Sparta</a></p>
+    <details>
+      <summary>Response shape</summary>
+      <pre>{
+  "query": "Sparta",
+  "count": 2,
+  "results": [
+    {
+      "name": "AC Sparta Praha",
+      "club_id": "<uuid>",
+      "club_type": "football",
+      "url": "https://www.fotbal.cz/...",
+      "logo_url": "https://.../logo.png",
+      "category": "Muži",
+      "address": "..."
+    }
+  ]
+}</pre>
+    </details>
+  </section>
+
+  <section class="ep">
+    <h2>Club Info + Matches</h2>
+    <p><strong>GET</strong> <code>/club/{type}/{id}</code></p>
+    <ul>
+      <li><code>{type}</code>: <code>football</code> | <code>futsal</code></li>
+      <li><code>{id}</code>: club UUID from fotbal.cz</li>
+    </ul>
+    <p>Example: <a id="ex-info" href="/club/football/00000000-0000-0000-0000-000000000000">/club/football/{id}</a></p>
+    <details>
+      <summary>Response shape</summary>
+      <pre>{
+  "name": "AC Sparta Praha",
+  "club_id": "00000000-0000-0000-0000-000000000000",
+  "club_type": "football",
+  "club_internal_id": "123456",
+  "url": "https://www.fotbal.cz/...",
+  "logo_url": "https://is1.fotbal.cz/media/kluby/.../logo.jpg",
+  "address": "Milady Horákové 98, 160 00 Praha 6",
+  "category": "Muži A",
+  "competitions": [
+    {
+      "id": "12345",
+      "code": "1. LIGA",
+      "name": "Fortuna Liga",
+      "team_count": "16",
+      "matches_link": "https://www.fotbal.cz/...",
+      "matches": [
+        {
+          "date_time": "12.08.2023 18:00",
+          "home": "AC Sparta Praha",
+          "home_id": "00000000-0000-0000-0000-000000000000",
+          "home_logo_url": "https://.../sparta.png",
+          "away": "SK Slavia Praha",
+          "away_id": "11111111-1111-1111-1111-111111111111",
+          "away_logo_url": "https://.../slavia.png",
+          "score": "2:1",
+          "venue": "Stadion Letná",
+          "match_id": "match12345",
+          "report_url": "https://www.fotbal.cz/..."
+        }
+      ]
+    }
+  ]
+}</pre>
+    </details>
+  </section>
+
+  <section class="ep">
+    <h2>Club Tables (Standings)</h2>
+    <p><strong>GET</strong> <code>/club/{type}/{id}/table</code></p>
+    <p>Returns standings (overall table) for each competition of the club.</p>
+    <p>Example: <a id="ex-table" href="/club/football/00000000-0000-0000-0000-000000000000/table">/club/football/{id}/table</a></p>
+    <details>
+      <summary>Response shape</summary>
+      <pre>{
+  "name": "AC Sparta Praha",
+  "club_id": "00000000-0000-0000-0000-000000000000",
+  "club_type": "football",
+  "club_internal_id": "123456",
+  "url": "https://www.fotbal.cz/...",
+  "logo_url": "https://is1.fotbal.cz/media/kluby/.../logo.jpg",
+  "competitions": [
+    {
+      "id": "12345",
+      "code": "1. LIGA",
+      "name": "Fortuna Liga",
+      "team_count": "16",
+      "matches_link": "https://www.fotbal.cz/...",
+      "table": {
+        "overall": [
+          {
+            "rank": "1",
+            "team": "AC Sparta Praha",
+            "team_id": "00000000-0000-0000-0000-000000000000",
+            "team_logo_url": "https://.../sparta.png",
+            "played": "10",
+            "wins": "8",
+            "draws": "2",
+            "losses": "0",
+            "score": "25:5",
+            "points": "26"
+          },
+          {
+            "rank": "2",
+            "team": "SK Slavia Praha",
+            "team_id": "11111111-1111-1111-1111-111111111111",
+            "team_logo_url": "https://.../slavia.png",
+            "played": "10",
+            "wins": "7",
+            "draws": "2",
+            "losses": "1",
+            "score": "20:8",
+            "points": "23"
+          }
+        ]
+      }
+    }
+  ]
+}</pre>
+    </details>
+  </section>
+
+  <section class="ep">
+    <h2>Shortcuts</h2>
+    <p><strong>GET</strong> <code>/club/{id}</code> → redirects to <code>/club/football/{id}</code></p>
+  </section>
+
+  <footer>
+    <p>Tip: Use a reverse proxy in production and set proper timeouts. This API scrapes public pages and may be rate-limited upstream.</p>
+  </footer>
+</body>
+</html>`)
+}
+
 func containsFold(s, substr string) bool {
-	s = strings.ToLower(strings.TrimSpace(s))
-	substr = strings.ToLower(strings.TrimSpace(substr))
-	if substr == "" {
-		return false
-	}
-	return strings.Contains(s, substr)
+    s = strings.ToLower(strings.TrimSpace(s))
+    substr = strings.ToLower(strings.TrimSpace(substr))
+    if substr == "" {
+        return false
+    }
+    return strings.Contains(s, substr)
 }
 
 // extractUUIDFromHref finds the first UUID-like token in an href and returns it.
 func extractUUIDFromHref(href string) string {
-	href = strings.TrimSpace(href)
-	if href == "" {
-		return ""
-	}
-	re := regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
-	if m := re.FindString(href); m != "" {
-		return m
-	}
-	// Fallback: some links may end with ID after slash; take last path token if it looks like hex+hyphenated
-	parts := strings.Split(href, "/")
-	if len(parts) > 0 {
-		cand := parts[len(parts)-1]
-		if re.MatchString(cand) {
-			return cand
-		}
-	}
-	return ""
+    href = strings.TrimSpace(href)
+    if href == "" {
+        return ""
+    }
+    re := regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+    if m := re.FindString(href); m != "" {
+        return m
+    }
+    // Fallback: some links may end with ID after slash; take last path token if it looks like hex+hyphenated
+    parts := strings.Split(href, "/")
+    if len(parts) > 0 {
+        cand := parts[len(parts)-1]
+        if re.MatchString(cand) {
+            return cand
+        }
+    }
+    return ""
 }
 
 type Match struct {
