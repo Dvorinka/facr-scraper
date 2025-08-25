@@ -336,8 +336,6 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
     }
     return matches
 }
-
-// --- Logo resolution via local /club/search with simple in-memory cache ---
 var logoCache = map[string]string{}
 
 type searchAPIResult struct {
@@ -345,6 +343,23 @@ type searchAPIResult struct {
 		Name    string `json:"name"`
 		LogoURL string `json:"logo_url"`
 	} `json:"results"`
+}
+
+// simplifyClubQuery takes a full club name like "FK Kofola Krnov" and returns
+// a simplified search token like "krnov" to improve chances of finding a logo.
+func simplifyClubQuery(name string) string {
+	s := strings.TrimSpace(name)
+	if s == "" {
+		return ""
+	}
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return ""
+	}
+	// Use the last word (often the city), strip simple punctuation, lowercased
+	last := parts[len(parts)-1]
+	last = strings.Trim(last, ",.;:-()[]{}\"'`“”’")
+	return strings.ToLower(last)
 }
 
 func getLogoBySearch(name string) string {
@@ -355,22 +370,38 @@ func getLogoBySearch(name string) string {
 	if v, ok := logoCache[key]; ok {
 		return v
 	}
-	// Query local API
-	apiURL := fmt.Sprintf("http://localhost:8080/club/search?q=%s", neturl.QueryEscape(name))
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(apiURL)
-	if err != nil {
-		return ""
+	// Prefer simplified last-word token (e.g., "krnov") to improve hit rate for logos
+	query := simplifyClubQuery(name)
+	if query == "" {
+		query = name
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		// drain body to allow reuse
-		io.Copy(io.Discard, resp.Body)
-		return ""
+
+	doSearch := func(q string) (searchAPIResult, bool) {
+		url := fmt.Sprintf("http://localhost:8080/club/search?q=%s", neturl.QueryEscape(q))
+		resp, err := client.Get(url)
+		if err != nil {
+			return searchAPIResult{}, false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			io.Copy(io.Discard, resp.Body)
+			return searchAPIResult{}, false
+		}
+		var payload searchAPIResult
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return searchAPIResult{}, false
+		}
+		return payload, true
 	}
-	var payload searchAPIResult
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return ""
+
+	payload, ok := doSearch(query)
+	if !ok || len(payload.Results) == 0 {
+		// Fallback to full name if simplified token yields nothing
+		payload, ok = doSearch(name)
+		if !ok {
+			return ""
+		}
 	}
 	// pick best match: exact (case-insensitive), then contains, else first
 	best := ""
