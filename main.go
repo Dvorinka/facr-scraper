@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -23,6 +25,316 @@ type Competition struct {
 	MatchesLink string            `json:"matches_link"`
 	Matches     []Match           `json:"matches,omitempty"`
 	Table       *CompetitionTable `json:"table,omitempty"`
+}
+
+// parseCompetitionMatchesFromFotbal scrapes matches from the public fotbal.cz
+// competition page (e.g., https://www.fotbal.cz/souteze/turnaje/table/{id}).
+// It filters to only include matches involving the given clubName if provided.
+func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID string) []Match {
+    pageURL = strings.TrimSpace(pageURL)
+    if pageURL == "" {
+        return nil
+    }
+    // Request with browser-like headers; some fotbal.cz pages 404 without them
+    req, _ := http.NewRequest("GET", pageURL, nil)
+    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+    req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+    req.Header.Set("Accept-Language", "cs-CZ,cs;q=0.9,en;q=0.8")
+    client := &http.Client{Timeout: 15 * time.Second}
+    resp, err := client.Do(req)
+    if err != nil {
+        log.Printf("fotbal.cz matches fetch error for %s: %v", pageURL, err)
+        return nil
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        log.Printf("fotbal.cz matches non-200 for %s: %d", pageURL, resp.StatusCode)
+        return nil
+    }
+    // Read body to optionally save and to allow multiple reads
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Printf("fotbal.cz matches read error for %s: %v", pageURL, err)
+        return nil
+    }
+    // Debug: save full HTML if env toggled
+    if os.Getenv("DEBUG_SAVE_HTML") != "" {
+        // derive a friendly filename from last URL path segment
+        comp := pageURL
+        if i := strings.LastIndex(comp, "/"); i >= 0 && i+1 < len(comp) {
+            comp = comp[i+1:]
+        }
+        fname := fmt.Sprintf("fotbal_comp_%s.html", comp)
+        if err := os.WriteFile(fname, body, 0644); err != nil {
+            log.Printf("failed writing debug HTML %s: %v", fname, err)
+        } else {
+            log.Printf("saved debug HTML: %s", fname)
+        }
+    }
+    doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+    if err != nil {
+        log.Printf("fotbal.cz matches parse error for %s: %v", pageURL, err)
+        return nil
+    }
+
+    var matches []Match
+    // Sections per round
+    doc.Find("section.js-matchRoundSection li.MatchRound").Each(func(_ int, li *goquery.Selection) {
+        a := li.Find("a.MatchRound-match").First()
+        if a.Length() == 0 {
+            return
+        }
+        // Teams
+        teamNames := []string{}
+        li.Find("a.MatchRound-match ul li span.H7").Each(func(_ int, s *goquery.Selection) {
+            t := strings.TrimSpace(s.Text())
+            if t != "" {
+                teamNames = append(teamNames, t)
+            }
+        })
+        if len(teamNames) < 2 {
+            return
+        }
+        home := teamNames[0]
+        away := teamNames[1]
+        // Try to extract team IDs from img URLs if present
+        imgIDs := []string{}
+        li.Find("a.MatchRound-match img").Each(func(_ int, img *goquery.Selection) {
+            src := strings.TrimSpace(img.AttrOr("src", ""))
+            if src == "" { return }
+            if id := extractUUIDFromHref(src); id != "" {
+                imgIDs = append(imgIDs, id)
+            }
+        })
+        homeID, awayID := "", ""
+        if len(imgIDs) >= 1 { homeID = imgIDs[0] }
+        if len(imgIDs) >= 2 { awayID = imgIDs[1] }
+        // Score
+        score := strings.TrimSpace(a.Find("strong.H4").First().Text())
+        if re := regexp.MustCompile(`\s*([0-9]+)\s*:\s*([0-9]+)\s*`); re != nil {
+            if m := re.FindStringSubmatch(score); len(m) == 3 {
+                score = fmt.Sprintf("%s:%s", m[1], m[2])
+            }
+        }
+        // Meta: date, match id in meta list and link
+        dateText := ""
+        li.Find(".MatchRound-meta p").Each(func(_ int, p *goquery.Selection) {
+            label := strings.TrimSpace(p.Find("strong").First().Text())
+            txt := strings.TrimSpace(p.Text())
+            if strings.HasPrefix(strings.ToLower(label), "datum") {
+                // Remove label from text
+                dateText = strings.TrimSpace(strings.ReplaceAll(txt, label+":", ""))
+            }
+        })
+        // Venue from details, if available
+        venue := ""
+        li.Find(".js-matchRoundDetails li p").Each(func(_ int, p *goquery.Selection) {
+            label := strings.TrimSpace(p.Find("strong").First().Text())
+            txt := strings.TrimSpace(p.Text())
+            if strings.HasPrefix(strings.ToLower(label), "hřiště") || strings.HasPrefix(strings.ToLower(label), "hriste") {
+                venue = strings.TrimSpace(strings.ReplaceAll(txt, label+":", ""))
+            }
+        })
+        // Match ID from the anchor href
+        matchID := extractUUIDFromHref(a.AttrOr("href", ""))
+        reportURL := ""
+        if matchID != "" {
+            if strings.EqualFold(clubType, "futsal") {
+                reportURL = fmt.Sprintf("https://www.fotbal.cz/futsal/zapasy/zapas/%s", matchID)
+            } else {
+                reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
+            }
+        }
+        // Filter by club involvement: prefer UUID match, fallback to name matching including last-word token
+        if clubName != "" || clubID != "" {
+            involved := false
+            // If we could extract team UUIDs, match by ID first (robust against aliases)
+            if clubID != "" && (strings.EqualFold(homeID, clubID) || strings.EqualFold(awayID, clubID)) {
+                involved = true
+            } else if clubName != "" {
+                // Fallback to fuzzy full-name matching
+                involved = strings.EqualFold(home, clubName) || strings.EqualFold(away, clubName) ||
+                    containsFold(clubName, home) || containsFold(clubName, away) ||
+                    containsFold(home, clubName) || containsFold(away, clubName)
+                // As a last resort, try matching the last word (e.g., city) token of the club name
+                if !involved {
+                    parts := strings.Fields(strings.TrimSpace(clubName))
+                    if len(parts) > 0 {
+                        last := parts[len(parts)-1]
+                        if last != "" {
+                            if containsFold(home, last) || containsFold(away, last) {
+                                involved = true
+                            }
+                        }
+                    }
+                }
+            }
+            if !involved { return }
+        }
+        // Backfill IDs for current club if missing
+        if homeID == "" {
+            if strings.EqualFold(home, clubName) || containsFold(home, clubName) || containsFold(clubName, home) {
+                homeID = clubID
+            } else {
+                parts := strings.Fields(strings.TrimSpace(clubName))
+                if len(parts) > 0 {
+                    last := parts[len(parts)-1]
+                    if last != "" && containsFold(home, last) {
+                        homeID = clubID
+                    }
+                }
+            }
+        }
+        if awayID == "" {
+            if strings.EqualFold(away, clubName) || containsFold(away, clubName) || containsFold(clubName, away) {
+                awayID = clubID
+            } else {
+                parts := strings.Fields(strings.TrimSpace(clubName))
+                if len(parts) > 0 {
+                    last := parts[len(parts)-1]
+                    if last != "" && containsFold(away, last) {
+                        awayID = clubID
+                    }
+                }
+            }
+        }
+        homeLogo := getLogo(home, homeID)
+        awayLogo := getLogo(away, awayID)
+        matches = append(matches, Match{
+            DateTime: dateText,
+            Home: home, HomeID: homeID, HomeLogoURL: homeLogo,
+            Away: away, AwayID: awayID, AwayLogoURL: awayLogo,
+            Score: score,
+            Venue: venue,
+            MatchID: matchID,
+            ReportURL: reportURL,
+        })
+    })
+    return matches
+}
+
+// parseCompetitionMatchesFromIS scrapes matches from the IS portal as fallback.
+func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string) []Match {
+    resp, err := http.Get(detailURL)
+    if err != nil {
+        log.Printf("IS matches fetch error for %s: %v", detailURL, err)
+        return nil
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK {
+        log.Printf("IS matches non-200 for %s: %d", detailURL, resp.StatusCode)
+        return nil
+    }
+    // Read body so we can optionally save and then parse from memory
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Printf("IS matches read error for %s: %v", detailURL, err)
+        return nil
+    }
+    if os.Getenv("DEBUG_SAVE_HTML") != "" {
+        // name the file using the req (competition id) if present
+        fname := "is_detail.html"
+        if u, err := neturl.Parse(detailURL); err == nil {
+            req := u.Query().Get("req")
+            sport := u.Query().Get("sport")
+            if req != "" {
+                fname = fmt.Sprintf("is_comp_%s_%s.html", req, sport)
+            }
+        }
+        if err := os.WriteFile(fname, body, 0644); err != nil {
+            log.Printf("failed writing debug IS HTML %s: %v", fname, err)
+        } else {
+            log.Printf("saved debug IS HTML: %s", fname)
+        }
+    }
+    docDetail, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+    if err != nil {
+        log.Printf("IS matches parse error for %s: %v", detailURL, err)
+        return nil
+    }
+    var matches []Match
+    totalRows := 0
+    keptRows := 0
+    docDetail.Find("table.soutez-zapasy tr").Each(func(_ int, s *goquery.Selection) {
+        if s.Find("th").Length() > 0 { return }
+        tds := s.Find("td")
+        if tds.Length() < 5 { return }
+        totalRows++
+        getText := func(sel *goquery.Selection) string { return strings.TrimSpace(sel.Text()) }
+        dt := getText(tds.Eq(0))
+        rawHome := getText(tds.Eq(1))
+        if idx := strings.Index(rawHome, "("); idx >= 0 { rawHome = strings.TrimSpace(rawHome[:idx]) }
+        rawAway := getText(tds.Eq(2))
+        if idx := strings.Index(rawAway, "("); idx >= 0 { rawAway = strings.TrimSpace(rawAway[:idx]) }
+        homeID := extractUUIDFromHref(tds.Eq(1).Find("a").First().AttrOr("href", ""))
+        awayID := extractUUIDFromHref(tds.Eq(2).Find("a").First().AttrOr("href", ""))
+        rawScore := getText(tds.Eq(3))
+        score := ""
+        if re := regexp.MustCompile(`(\d+)\s*:\s*(\d+)`); re != nil {
+            if m := re.FindStringSubmatch(rawScore); len(m) == 3 { score = fmt.Sprintf("%s:%s", m[1], m[2]) }
+        }
+        venue := ""
+        if tds.Length() > 4 { venue = getText(tds.Eq(4)) }
+        var reportURL, matchID string
+        var isReportHref, isDelegHref string
+        // Use the last column for links to be robust to optional columns
+        tds.Eq(tds.Length()-1).Find("a").Each(func(_ int, a *goquery.Selection) {
+            href := strings.TrimSpace(a.AttrOr("href", ""))
+            if href == "" { return }
+            if u, err := neturl.Parse(href); err == nil {
+                if id := u.Query().Get("zapas"); id != "" { matchID = id }
+            }
+            // Capture specific IS links
+            if strings.Contains(href, "zapis-o-utkani-report.aspx") {
+                isReportHref = resolveISURL(href)
+            }
+            if strings.Contains(href, "zapas-delegace-report.aspx") {
+                isDelegHref = resolveISURL(href)
+            }
+        })
+        if matchID != "" {
+            if strings.EqualFold(clubType, "futsal") {
+                reportURL = fmt.Sprintf("https://www.fotbal.cz/futsal/zapasy/futsal/%s", matchID)
+            } else {
+                reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
+            }
+        }
+        // Filter by club involvement: prefer UUID match, fallback to name matching
+        if clubName != "" || clubID != "" {
+            involved := false
+            if clubID != "" && (strings.EqualFold(homeID, clubID) || strings.EqualFold(awayID, clubID)) {
+                involved = true
+            } else if clubName != "" {
+                involved = strings.EqualFold(rawHome, clubName) || strings.EqualFold(rawAway, clubName) ||
+                    containsFold(clubName, rawHome) || containsFold(clubName, rawAway) ||
+                    containsFold(rawHome, clubName) || containsFold(rawAway, clubName)
+                if !involved {
+                    parts := strings.Fields(strings.TrimSpace(clubName))
+                    if len(parts) > 0 {
+                        last := parts[len(parts)-1]
+                        if last != "" && (containsFold(rawHome, last) || containsFold(rawAway, last)) {
+                            involved = true
+                        }
+                    }
+                }
+            }
+            if !involved { return }
+        }
+        keptRows++
+        if homeID == "" {
+            if strings.EqualFold(rawHome, clubName) || containsFold(rawHome, clubName) || containsFold(clubName, rawHome) { homeID = clubID }
+        }
+        if awayID == "" {
+            if strings.EqualFold(rawAway, clubName) || containsFold(rawAway, clubName) || containsFold(clubName, rawAway) { awayID = clubID }
+        }
+        homeLogo := getLogo(rawHome, homeID)
+        awayLogo := getLogo(rawAway, awayID)
+        matches = append(matches, Match{DateTime: dt, Home: rawHome, HomeID: homeID, HomeLogoURL: homeLogo, Away: rawAway, AwayID: awayID, AwayLogoURL: awayLogo, Score: score, Venue: venue, MatchID: matchID, ReportURL: func() string { if isReportHref != "" { return isReportHref }; return reportURL }(), DelegationURL: isDelegHref})
+    })
+    if os.Getenv("DEBUG_SAVE_HTML") != "" {
+        log.Printf("IS parse summary for %s: total rows=%d, kept=%d", detailURL, totalRows, keptRows)
+    }
+    return matches
 }
 
 // --- Logo resolution via local /club/search with simple in-memory cache ---
@@ -526,95 +838,17 @@ func getClubInfo(w http.ResponseWriter, r *http.Request) {
 	// For each competition, fetch matches
 	for i := range competitions {
 		comp := &competitions[i]
-		detailURL := fmt.Sprintf("https://is.fotbal.cz/public/souteze/detail-souteze.aspx?req=%s&sport=%s", comp.ID, sportParam)
-		resp, err := http.Get(detailURL)
-		if err != nil {
-			log.Printf("error fetching competition detail for %s: %v", comp.ID, err)
-			continue
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("non-200 response for %s: %d", comp.ID, resp.StatusCode)
-			continue
-		}
-		docDetail, err := goquery.NewDocumentFromReader(resp.Body)
-		if err != nil {
-			log.Printf("error parsing competition HTML for %s: %v", comp.ID, err)
-			continue
-		}
-		var matches []Match
-		docDetail.Find("table.soutez-zapasy tr").Each(func(_ int, s *goquery.Selection) {
-			if s.Find("th").Length() > 0 { // skip header
-				return
-			}
-			tds := s.Find("td")
-			if tds.Length() < 7 {
-				return
-			}
-			getText := func(sel *goquery.Selection) string { return strings.TrimSpace(sel.Text()) }
-			dt := getText(tds.Eq(0))
-			rawHome := getText(tds.Eq(1))
-			if idx := strings.Index(rawHome, "("); idx >= 0 {
-				rawHome = strings.TrimSpace(rawHome[:idx])
-			}
-			rawAway := getText(tds.Eq(2))
-			if idx := strings.Index(rawAway, "("); idx >= 0 {
-				rawAway = strings.TrimSpace(rawAway[:idx])
-			}
-			homeID := extractUUIDFromHref(tds.Eq(1).Find("a").First().AttrOr("href", ""))
-			awayID := extractUUIDFromHref(tds.Eq(2).Find("a").First().AttrOr("href", ""))
-			rawScore := getText(tds.Eq(3))
-			score := ""
-			if re := regexp.MustCompile(`(\d+)\s*:\s*(\d+)`); re != nil {
-				if m := re.FindStringSubmatch(rawScore); len(m) == 3 {
-					score = fmt.Sprintf("%s:%s", m[1], m[2])
-				}
-			}
-			venue := getText(tds.Eq(4))
-			note := ""
-			var reportURL, matchID string
-			tds.Eq(6).Find("a").Each(func(_ int, a *goquery.Selection) {
-				href := strings.TrimSpace(a.AttrOr("href", ""))
-				if href == "" {
-					return
-				}
-				if u, err := neturl.Parse(href); err == nil {
-					if id := u.Query().Get("zapas"); id != "" {
-						matchID = id
-					}
-				}
-			})
-			if matchID != "" {
-				if strings.EqualFold(clubType, "futsal") {
-					reportURL = fmt.Sprintf("https://www.fotbal.cz/futsal/zapasy/futsal/%s", matchID)
-				} else {
-					reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
-				}
-			}
-			if clubName != "" {
-				involved := strings.EqualFold(rawHome, clubName) || strings.EqualFold(rawAway, clubName) ||
-					containsFold(clubName, rawHome) || containsFold(clubName, rawAway) ||
-					containsFold(rawHome, clubName) || containsFold(rawAway, clubName)
-				if !involved {
-					return
-				}
-			}
-			// Backfill IDs for the current club if missing to ensure correct logo resolution
-			if homeID == "" {
-				if strings.EqualFold(rawHome, clubName) || containsFold(rawHome, clubName) || containsFold(clubName, rawHome) {
-					homeID = clubID
-				}
-			}
-			if awayID == "" {
-				if strings.EqualFold(rawAway, clubName) || containsFold(rawAway, clubName) || containsFold(clubName, rawAway) {
-					awayID = clubID
-				}
-			}
-			homeLogo := getLogo(rawHome, homeID)
-			awayLogo := getLogo(rawAway, awayID)
-			matches = append(matches, Match{DateTime: dt, Home: rawHome, HomeID: homeID, HomeLogoURL: homeLogo, Away: rawAway, AwayID: awayID, AwayLogoURL: awayLogo, Score: score, Venue: venue, Note: note, MatchID: matchID, ReportURL: reportURL})
-		})
-		comp.Matches = matches
+		matchesLink := comp.MatchesLink
+		// 1) Try parsing from the public fotbal.cz competition page (matches_link)
+		matches := parseCompetitionMatchesFromFotbal(matchesLink, clubType, clubName, clubID)
+        // Always try IS as well and prefer it if it provides at least as many matches
+        detailURL := fmt.Sprintf("https://is.fotbal.cz/public/souteze/detail-souteze.aspx?req=%s&sport=%s", comp.ID, sportParam)
+        isMatches := parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID)
+        // Prefer IS whenever it yields any results, as IS often contains alias team names
+        if len(isMatches) > 0 {
+            matches = isMatches
+        }
+        comp.Matches = matches
 	}
 
 	clubInfo := ClubInfo{
