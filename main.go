@@ -89,14 +89,14 @@ func getLogo(teamName string, teamID string) string {
 	if name == "" || strings.Contains(name, "volno") || strings.Contains(name, "volný los") || strings.Contains(name, "volny los") || strings.Contains(name, "bye") {
 		return placeholder
 	}
-	// Try search endpoint
+	// If we have a team ID, construct the official logo URL directly.
+	// This avoids wrong matches for duplicate names (e.g., multiple "Ořechov").
+	if tid := strings.TrimSpace(teamID); tid != "" {
+		return fmt.Sprintf("https://is1.fotbal.cz/media/kluby/%s/%s_crop.jpg", tid, tid)
+	}
+	// Otherwise, try the local search endpoint by name.
 	if logo := getLogoBySearch(teamName); logo != "" {
 		return logo
-	}
-	// Fallback to constructed URL if we have an ID
-	tid := strings.TrimSpace(teamID)
-	if tid != "" {
-		return fmt.Sprintf("https://is1.fotbal.cz/media/kluby/%s/%s_crop.jpg", tid, tid)
 	}
 	// No ID and no search hit -> placeholder
 	return placeholder
@@ -599,7 +599,17 @@ func getClubInfo(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			// Compose logo URLs for both teams when IDs are available
+			// Backfill IDs for the current club if missing to ensure correct logo resolution
+			if homeID == "" {
+				if strings.EqualFold(rawHome, clubName) || containsFold(rawHome, clubName) || containsFold(clubName, rawHome) {
+					homeID = clubID
+				}
+			}
+			if awayID == "" {
+				if strings.EqualFold(rawAway, clubName) || containsFold(rawAway, clubName) || containsFold(clubName, rawAway) {
+					awayID = clubID
+				}
+			}
 			homeLogo := getLogo(rawHome, homeID)
 			awayLogo := getLogo(rawAway, awayID)
 			matches = append(matches, Match{DateTime: dt, Home: rawHome, HomeID: homeID, HomeLogoURL: homeLogo, Away: rawAway, AwayID: awayID, AwayLogoURL: awayLogo, Score: score, Venue: venue, Note: note, MatchID: matchID, ReportURL: reportURL})
