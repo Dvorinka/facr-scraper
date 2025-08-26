@@ -197,6 +197,7 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
             Venue: venue,
             MatchID: matchID,
             ReportURL: reportURL,
+            FACRLink:  reportURL,
         })
     })
     return matches
@@ -288,6 +289,8 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
                 reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
             }
         }
+        // Canonical fotbal.cz link
+        facrLink := reportURL
         // Filter by club involvement: prefer UUID match, fallback to name matching with simplified token
         if clubName != "" || clubID != "" {
             involved := false
@@ -321,7 +324,7 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
         }
         homeLogo := getLogo(rawHome, homeID)
         awayLogo := getLogo(rawAway, awayID)
-        matches = append(matches, Match{DateTime: dt, Home: rawHome, HomeID: homeID, HomeLogoURL: homeLogo, Away: rawAway, AwayID: awayID, AwayLogoURL: awayLogo, Score: score, Venue: venue, MatchID: matchID, ReportURL: func() string { if isReportHref != "" { return isReportHref }; return reportURL }(), DelegationURL: isDelegHref})
+        matches = append(matches, Match{DateTime: dt, Home: rawHome, HomeID: homeID, HomeLogoURL: homeLogo, Away: rawAway, AwayID: awayID, AwayLogoURL: awayLogo, Score: score, Venue: venue, MatchID: matchID, ReportURL: func() string { if isReportHref != "" { return isReportHref }; return reportURL }(), FACRLink: facrLink, DelegationURL: isDelegHref})
     })
     if os.Getenv("DEBUG_SAVE_HTML") != "" {
         log.Printf("IS parse summary for %s: total rows=%d, kept=%d", detailURL, totalRows, keptRows)
@@ -1134,33 +1137,34 @@ func extractUUIDFromHref(href string) string {
 }
 
 type Match struct {
-	DateTime      string `json:"date_time"`
-	Home          string `json:"home"`
-	HomeID        string `json:"home_id,omitempty"`
-	HomeLogoURL   string `json:"home_logo_url,omitempty"`
-	Away          string `json:"away"`
-	AwayID        string `json:"away_id,omitempty"`
-	AwayLogoURL   string `json:"away_logo_url,omitempty"`
-	Score         string `json:"score"`
-	Venue         string `json:"venue"`
-	Note          string `json:"note,omitempty"`
-	MatchID       string `json:"match_id"`
-	ReportURL     string `json:"report_url,omitempty"`
-	DelegationURL string `json:"delegation_url,omitempty"`
+    DateTime      string `json:"date_time"`
+    Home          string `json:"home"`
+    HomeID        string `json:"home_id,omitempty"`
+    HomeLogoURL   string `json:"home_logo_url,omitempty"`
+    Away          string `json:"away"`
+    AwayID        string `json:"away_id,omitempty"`
+    AwayLogoURL   string `json:"away_logo_url,omitempty"`
+    Score         string `json:"score"`
+    Venue         string `json:"venue"`
+    Note          string `json:"note,omitempty"`
+    MatchID       string `json:"match_id"`
+    ReportURL     string `json:"report_url,omitempty"`
+    FACRLink      string `json:"facr_link,omitempty"`
+    DelegationURL string `json:"delegation_url,omitempty"`
 }
 
 // TableRow represents one row in a standings table
 type TableRow struct {
-	Rank        string `json:"rank"`
-	Team        string `json:"team"`
-	TeamID      string `json:"team_id,omitempty"`
-	TeamLogoURL string `json:"team_logo_url,omitempty"`
-	Played      string `json:"played"`
-	Wins        string `json:"wins"`
-	Draws       string `json:"draws"`
-	Losses      string `json:"losses"`
-	Score       string `json:"score"`
-	Points      string `json:"points"`
+    Rank        string `json:"rank"`
+    Team        string `json:"team"`
+    TeamID      string `json:"team_id,omitempty"`
+    TeamLogoURL string `json:"team_logo_url,omitempty"`
+    Played      string `json:"played"`
+    Wins        string `json:"wins"`
+    Draws       string `json:"draws"`
+    Losses      string `json:"losses"`
+    Score       string `json:"score"`
+    Points      string `json:"points"`
 }
 
 // resolveISURL makes relative IS links absolute against https://is.fotbal.cz/public/
