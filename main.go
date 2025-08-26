@@ -145,7 +145,7 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
                 reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
             }
         }
-        // Filter by club involvement: prefer UUID match, fallback to name matching including last-word token
+        // Filter by club involvement: prefer UUID match, fallback to name matching including simplified token
         if clubName != "" || clubID != "" {
             involved := false
             // If we could extract team UUIDs, match by ID first (robust against aliases)
@@ -156,16 +156,11 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
                 involved = strings.EqualFold(home, clubName) || strings.EqualFold(away, clubName) ||
                     containsFold(clubName, home) || containsFold(clubName, away) ||
                     containsFold(home, clubName) || containsFold(away, clubName)
-                // As a last resort, try matching the last word (e.g., city) token of the club name
+                // As a last resort, try matching a simplified token (e.g., city) of the club name
                 if !involved {
-                    parts := strings.Fields(strings.TrimSpace(clubName))
-                    if len(parts) > 0 {
-                        last := parts[len(parts)-1]
-                        if last != "" {
-                            if containsFold(home, last) || containsFold(away, last) {
-                                involved = true
-                            }
-                        }
+                    token := simplifyClubQuery(clubName)
+                    if token != "" && (containsFold(home, token) || containsFold(away, token)) {
+                        involved = true
                     }
                 }
             }
@@ -176,12 +171,9 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
             if strings.EqualFold(home, clubName) || containsFold(home, clubName) || containsFold(clubName, home) {
                 homeID = clubID
             } else {
-                parts := strings.Fields(strings.TrimSpace(clubName))
-                if len(parts) > 0 {
-                    last := parts[len(parts)-1]
-                    if last != "" && containsFold(home, last) {
-                        homeID = clubID
-                    }
+                token := simplifyClubQuery(clubName)
+                if token != "" && containsFold(home, token) {
+                    homeID = clubID
                 }
             }
         }
@@ -189,12 +181,9 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
             if strings.EqualFold(away, clubName) || containsFold(away, clubName) || containsFold(clubName, away) {
                 awayID = clubID
             } else {
-                parts := strings.Fields(strings.TrimSpace(clubName))
-                if len(parts) > 0 {
-                    last := parts[len(parts)-1]
-                    if last != "" && containsFold(away, last) {
-                        awayID = clubID
-                    }
+                token := simplifyClubQuery(clubName)
+                if token != "" && containsFold(away, token) {
+                    awayID = clubID
                 }
             }
         }
@@ -299,7 +288,7 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
                 reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
             }
         }
-        // Filter by club involvement: prefer UUID match, fallback to name matching
+        // Filter by club involvement: prefer UUID match, fallback to name matching with simplified token
         if clubName != "" || clubID != "" {
             involved := false
             if clubID != "" && (strings.EqualFold(homeID, clubID) || strings.EqualFold(awayID, clubID)) {
@@ -309,12 +298,9 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
                     containsFold(clubName, rawHome) || containsFold(clubName, rawAway) ||
                     containsFold(rawHome, clubName) || containsFold(rawAway, clubName)
                 if !involved {
-                    parts := strings.Fields(strings.TrimSpace(clubName))
-                    if len(parts) > 0 {
-                        last := parts[len(parts)-1]
-                        if last != "" && (containsFold(rawHome, last) || containsFold(rawAway, last)) {
-                            involved = true
-                        }
+                    token := simplifyClubQuery(clubName)
+                    if token != "" && (containsFold(rawHome, token) || containsFold(rawAway, token)) {
+                        involved = true
                     }
                 }
             }
@@ -322,10 +308,16 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
         }
         keptRows++
         if homeID == "" {
-            if strings.EqualFold(rawHome, clubName) || containsFold(rawHome, clubName) || containsFold(clubName, rawHome) { homeID = clubID }
+            if strings.EqualFold(rawHome, clubName) || containsFold(rawHome, clubName) || containsFold(clubName, rawHome) { homeID = clubID } else {
+                token := simplifyClubQuery(clubName)
+                if token != "" && containsFold(rawHome, token) { homeID = clubID }
+            }
         }
         if awayID == "" {
-            if strings.EqualFold(rawAway, clubName) || containsFold(rawAway, clubName) || containsFold(clubName, rawAway) { awayID = clubID }
+            if strings.EqualFold(rawAway, clubName) || containsFold(rawAway, clubName) || containsFold(clubName, rawAway) { awayID = clubID } else {
+                token := simplifyClubQuery(clubName)
+                if token != "" && containsFold(rawAway, token) { awayID = clubID }
+            }
         }
         homeLogo := getLogo(rawHome, homeID)
         awayLogo := getLogo(rawAway, awayID)
@@ -339,91 +331,109 @@ func parseCompetitionMatchesFromIS(detailURL, clubType, clubName, clubID string)
 var logoCache = map[string]string{}
 
 type searchAPIResult struct {
-	Results []struct {
-		Name    string `json:"name"`
-		LogoURL string `json:"logo_url"`
-	} `json:"results"`
+    Results []struct {
+        Name    string `json:"name"`
+        LogoURL string `json:"logo_url"`
+    } `json:"results"`
 }
 
-// simplifyClubQuery takes a full club name like "FK Kofola Krnov" and returns
 // a simplified search token like "krnov" to improve chances of finding a logo.
 func simplifyClubQuery(name string) string {
-	s := strings.TrimSpace(name)
-	if s == "" {
-		return ""
-	}
-	parts := strings.Fields(s)
-	if len(parts) == 0 {
-		return ""
-	}
-	// Use the last word (often the city), strip simple punctuation, lowercased
-	last := parts[len(parts)-1]
-	last = strings.Trim(last, ",.;:-()[]{}\"'`“”’")
-	return strings.ToLower(last)
+    s := strings.TrimSpace(name)
+    if s == "" {
+        return ""
+    }
+    parts := strings.Fields(s)
+    if len(parts) == 0 {
+        return ""
+    }
+    // Walk from the end to find a meaningful token (avoid legal suffixes like "z.s.")
+    stop := map[string]struct{}{
+        "z.s.": {}, "z.s": {}, "zs": {}, "zapsany": {}, "zapsaný": {}, "spolek": {},
+        "o.s.": {}, "o.s": {}, "os": {}, "a.s.": {}, "a.s": {}, "as": {},
+        "s.r.o.": {}, "s.r.o": {}, "sro": {},
+    }
+    for i := len(parts) - 1; i >= 0; i-- {
+        tok := parts[i]
+        tok = strings.Trim(tok, ",.;:-()[]{}\"'`“”’")
+        lt := strings.ToLower(tok)
+        if _, banned := stop[lt]; banned {
+            continue
+        }
+        // prefer tokens with letters and length >= 3
+        letters := regexp.MustCompile(`[a-zA-Zá-žÁ-Ž]`).MatchString
+        if len([]rune(lt)) >= 3 && letters(lt) {
+            return lt
+        }
+    }
+    // Fallback to last token sanitized
+    last := strings.Trim(parts[len(parts)-1], ",.;:-()[]{}\"'`“”’")
+    return strings.ToLower(last)
 }
 
 func getLogoBySearch(name string) string {
-	key := strings.ToLower(strings.TrimSpace(name))
-	if key == "" {
-		return ""
-	}
-	if v, ok := logoCache[key]; ok {
-		return v
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	// Prefer simplified last-word token (e.g., "krnov") to improve hit rate for logos
-	query := simplifyClubQuery(name)
-	if query == "" {
-		query = name
-	}
+    key := strings.ToLower(strings.TrimSpace(name))
+    if key == "" {
+        return ""
+    }
+    if v, ok := logoCache[key]; ok {
+        return v
+    }
+    client := &http.Client{Timeout: 5 * time.Second}
+    // Prefer simplified last-word token (e.g., "krnov") to improve hit rate for logos
+    query := simplifyClubQuery(name)
+    if query == "" {
+        query = name
+    }
 
-	doSearch := func(q string) (searchAPIResult, bool) {
-		url := fmt.Sprintf("http://localhost:8080/club/search?q=%s", neturl.QueryEscape(q))
-		resp, err := client.Get(url)
-		if err != nil {
-			return searchAPIResult{}, false
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			io.Copy(io.Discard, resp.Body)
-			return searchAPIResult{}, false
-		}
-		var payload searchAPIResult
-		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-			return searchAPIResult{}, false
-		}
-		return payload, true
-	}
+    doSearch := func(q string) (searchAPIResult, bool) {
+        url := fmt.Sprintf("http://localhost:8080/club/search?q=%s", neturl.QueryEscape(q))
+        resp, err := client.Get(url)
+        if err != nil {
+            return searchAPIResult{}, false
+        }
+        defer resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            io.Copy(io.Discard, resp.Body)
+            return searchAPIResult{}, false
+        }
+        var payload searchAPIResult
+        if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+            return searchAPIResult{}, false
+        }
+        return payload, true
+    }
 
-	payload, ok := doSearch(query)
-	if !ok || len(payload.Results) == 0 {
-		// Fallback to full name if simplified token yields nothing
-		payload, ok = doSearch(name)
-		if !ok {
-			return ""
-		}
-	}
-	// pick best match: exact (case-insensitive), then contains, else first
-	best := ""
-	for _, r := range payload.Results {
-		if strings.EqualFold(strings.TrimSpace(r.Name), strings.TrimSpace(name)) {
-			best = r.LogoURL
-			break
-		}
-	}
-	if best == "" {
-		for _, r := range payload.Results {
-			if strings.Contains(strings.ToLower(r.Name), key) || strings.Contains(key, strings.ToLower(r.Name)) {
-				best = r.LogoURL
-				break
-			}
-		}
-	}
-	if best == "" && len(payload.Results) > 0 {
-		best = payload.Results[0].LogoURL
-	}
-	logoCache[key] = best
-	return best
+    payload, ok := doSearch(query)
+    if !ok || len(payload.Results) == 0 {
+        // Fallback to full name if simplified token yields nothing
+        payload, ok = doSearch(name)
+        if !ok {
+            return ""
+        }
+    }
+    // pick best match: exact (case-insensitive), then contains, else first
+    best := ""
+    for _, r := range payload.Results {
+        if strings.EqualFold(strings.TrimSpace(r.Name), strings.TrimSpace(name)) {
+            best = r.LogoURL
+            break
+        }
+    }
+    if best == "" {
+        for _, r := range payload.Results {
+            rname := strings.ToLower(r.Name)
+            if strings.Contains(rname, key) || strings.Contains(key, rname) {
+                best = r.LogoURL
+                break
+            }
+        }
+    }
+    if best == "" && len(payload.Results) > 0 {
+        best = payload.Results[0].LogoURL
+    }
+    logoCache[key] = best
+    return best
 }
 
 func getLogo(teamName string, teamID string) string {
