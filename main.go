@@ -140,7 +140,7 @@ func parseCompetitionMatchesFromFotbal(pageURL, clubType, clubName, clubID strin
         reportURL := ""
         if matchID != "" {
             if strings.EqualFold(clubType, "futsal") {
-                reportURL = fmt.Sprintf("https://www.fotbal.cz/futsal/zapasy/zapas/%s", matchID)
+                reportURL = fmt.Sprintf("https://www.fotbal.cz/futsal/zapasy/futsal/%s", matchID)
             } else {
                 reportURL = fmt.Sprintf("https://www.fotbal.cz/souteze/zapasy/zapas/%s", matchID)
             }
