@@ -390,7 +390,7 @@ func getLogoBySearch(name string) string {
     }
 
     doSearch := func(q string) (searchAPIResult, bool) {
-        url := fmt.Sprintf("http://localhost:8080/club/search?q=%s", neturl.QueryEscape(q))
+        url := fmt.Sprintf("http://localhost:8686/club/search?q=%s", neturl.QueryEscape(q))
         resp, err := client.Get(url)
         if err != nil {
             return searchAPIResult{}, false
@@ -921,7 +921,7 @@ func main() {
         http.Redirect(w, r, "/club/football/"+vars["id"], http.StatusMovedPermanently)
     }).Methods("GET")
     r.HandleFunc("/", docsHandler)
-    port := ":8080"
+    port := ":8686"
     fmt.Printf("Server running on http://localhost%s\n", port)
     log.Fatal(http.ListenAndServe(port, r))
 }
